@@ -304,11 +304,11 @@ pub struct TestCollector {
     map: BTreeMap<u64, BTreeMap<GenericArray<u8, typenum::U32>, Vec<PathBuf>>>,
 }
 impl TestCollector {
-    fn write_to_file(&self, output_path:&str) {
+    fn write_to_file(&self, output_path: &str) {
         let mut map: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
         for (key, value) in self.map.iter() {
             let key = key.to_string();
-            let mut entry = map.entry(key).or_default();
+            let entry = map.entry(key).or_default();
             for (hash, paths) in value.iter() {
                 let key = format!("{:x}", hash);
                 entry.entry(key).or_insert(
@@ -318,8 +318,9 @@ impl TestCollector {
                         .collect(),
                 );
             }
-            serde_json::to_writer_pretty(std::fs::File::create(output_path).unwrap(), &map).unwrap();
         }
+        serde_json::to_writer_pretty(std::fs::File::create(output_path).unwrap(), &map)
+            .unwrap();
     }
 }
 impl Actor for TestCollector {
@@ -345,9 +346,52 @@ impl Actor for TestCollector {
         self.write_to_file("collisions.json");
     }
 }
+pub struct BytewiseFileComparator {
+    recv: ActorReceiver<FullHashMessage>,
+    sender: ActorSender<(PathBuf, Vec<PathBuf>)>,
+    // T Y P E S
+    map: BTreeMap<u64, BTreeMap<GenericArray<u8, typenum::U32>, BTreeMap<PathBuf, Vec<PathBuf>>>>,
+}
 
-pub fn run_actors(path: &Path) -> JoinSet<()> {
+struct FileExclusionFilter {
+    reciever: ActorReceiver<PathBuf>,
+    sender: ActorSender<PathBuf>,
+    excluded_extensions: Option<Vec<String>>,
+    included_extensions: Option<Vec<String>>,
+}
+impl Actor for FileExclusionFilter {
+    async fn operate(&mut self) {
+        let mut vec = Vec::new();
+        while let read= self.reciever.recv_many(&mut vec, 100).await && read >0{
+            for x in vec.drain(..read) {
+                if self.excluded_extensions.is_some()
+                    && self
+                    .excluded_extensions
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|ext| x.extension().is_some_and(|x| *ext == *x.to_string_lossy()))
+                {
+                    continue;
+                }
+                if self.included_extensions.is_some()
+                    && !self
+                    .included_extensions
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|ext| x.extension().is_some_and(|x| *x.to_string_lossy() == *ext))
+                {
+                    continue;
+                }
+                self.sender.send(x).unwrap();
+            }
+        }
+    }
+}
+pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
     let (file_sender, file_recv) = unbounded_channel();
+    let (file_ext_sender, file_ext_recv) = unbounded_channel();
     let (size_sender, size_recv) = unbounded_channel();
     let (size_filter_sender, size_filter_recv) = unbounded_channel();
     let (partial_hash_sender, partial_filter_recv) = unbounded_channel();
@@ -355,23 +399,52 @@ pub fn run_actors(path: &Path) -> JoinSet<()> {
     let (full_filter_sender, full_filter_recv) = unbounded_channel();
     let (collector_sender, collector_reciever) = unbounded_channel();
     let mut js = JoinSet::new();
-    let path = path.to_path_buf();
-    js.spawn(async move {
-        let mut file_actor = FileRecursionActor {
-            queue: VecDeque::new(),
-            sender: file_sender,
-        };
-        file_actor.queue.push_back(path);
-        file_actor.operate().await
-    });
-    tokio::spawn(async move {
-        let mut size = INodeFilter {
-            reciever: file_recv,
-            seen: HashSet::default(),
-            sender: size_sender,
-        };
-        size.operate().await;
-    });
+    let path = args.directory_entry_point.clone().unwrap_or(PathBuf::from("."));
+    {
+        let needs_filter = args.excluded_extensions.is_some() || args.included_extensions.is_some();
+        js.spawn(async move {
+            let mut file_actor = FileRecursionActor {
+                queue: VecDeque::new(),
+                sender: file_sender,
+            };
+            file_actor.queue.push_back(path);
+            file_actor.operate().await
+        });
+        if needs_filter {
+            let exc_ext = args.excluded_extensions.clone();
+            let inc_ext = args.included_extensions.clone();
+            js.spawn(async move {
+                let mut ext_filter = FileExclusionFilter {
+                    excluded_extensions: exc_ext,
+                    included_extensions: inc_ext,
+                    sender: file_ext_sender,
+                    reciever: file_recv,
+                };
+                ext_filter.operate().await;
+            });
+            js.spawn(async move {
+                let mut size = INodeFilter {
+                    reciever: file_ext_recv,
+                    seen: HashSet::default(),
+                    sender: size_sender,
+                };
+                size.operate().await;
+            });
+        } else {
+            js.spawn(async move {
+                let mut size = INodeFilter {
+                    reciever: if needs_filter {
+                        file_ext_recv
+                    } else {
+                        file_recv
+                    },
+                    seen: HashSet::default(),
+                    sender: size_sender,
+                };
+                size.operate().await;
+            });
+        }
+    }
     js.spawn(async move {
         let mut file_filter = FileSizeFilter {
             receiver: size_recv,

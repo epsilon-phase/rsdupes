@@ -46,6 +46,13 @@ struct Args {
     threads: usize,
     #[arg(value_name = "DIRECTORY")]
     directory_entry_point: Option<PathBuf>,
+    /// File extensions to limit operation to.
+    #[arg(short,long)]
+    included_extensions: Option<Vec<String>>,
+    /// File extensions to explicitly disinclude
+    /// Not sensible to combine with desired extensions, but should work just fine.
+    #[arg(short,long)]
+    excluded_extensions: Option<Vec<String>>
 }
 fn main() {
     let args = Args::parse();
@@ -56,13 +63,14 @@ fn main() {
     } else {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(25)
-            .max_blocking_threads(1000)
+            .max_blocking_threads(100)
             .build()
     }
     .unwrap();
     runtime.block_on(async move {
         use actors::Actor;
-        let mut js = actors::run_actors(&args.directory_entry_point.unwrap_or(PathBuf::from(".")));
+        
+        let mut js = actors::run_actors(&&args);
         while !js.is_empty() {
             js.join_next().await;
         }

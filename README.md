@@ -15,15 +15,19 @@ Future functionality:
 
      Probably something like
      `rsdupes ~ -exec <COMMAND> %OLDEST %-OLDEST`
-    1. Provide Oldest File
+     1. Provide Oldest File
 
-       `%OLDEST`
-    2. Full file group modulo oldest file
+        `%OLDEST`
+     2. Full file group modulo the oldest file
 
-       Probably something like `%-OLDEST`
-    3. Full file group
+        Probably something like `%-OLDEST`
+     3. Full file group
 
-       Something like `%GROUP`
+        Something like `%GROUP`
+  4. Linking like jsdupes focuses on
+     1. Hardlinking
+     2. Symbolic links
+     3. Reflinks
 * Specify partial hash size
 * Specify thread pool sizes
 * Provide some way to finish filtering current tasks when there are dozens before spawning new ones.
@@ -34,6 +38,7 @@ Future functionality:
   usecase
 * Use memory mapped files somehow. It would reduce copying substantially which would likely reduce the
   overall system load, even if this program can saturate IO.
+* Operate exclusively on files that match or do not match a given pattern
 
 # Current JSON Structure
 
@@ -52,50 +57,50 @@ Future functionality:
 ```
 ┌────────────────────────────┐
 │ Filesystem recursion actor │
-└─────────────┬──────────────┘
-              │
-              │ (File Paths)
-              🡳
-    ┌──────────────────┐
-    │Inode Deduplicator│
+└─────────────┬──────────────┘    ┌───────────────┐    
+              ├───────────────────┤FileFilterActor│
+              │ (File Paths)      └───────┬───────┘
+              │                           │
+    ┌─────────┴────────┐                  │
+    │Inode Deduplicator├──────────────────┘
     └─────────┬────────┘
-              🡳 (File Paths)
-    ┌──────────────────────┐
+              │ (File Paths)
+    ┌─────────┴────────────┐
     │ Size Duplicate buffer│
     └─────────┬────────────┘
-              🡳 (File Paths)
-     ┌────────────────┐
+              │ (File Paths)
+     ┌────────┴───────┐
      │ Partial hasher │
      └────────┬───────┘
               │
               │  (Filesize,PartialHash,Path)
-              🡳
-┌─────────────────────────────┐
+              │
+┌─────────────┴───────────────┐
 │Partial Hash duplicate buffer│
 └─────────────┬───────────────┘
-              🡳
-        ┌───────────┐
+              │
+        ┌─────┴─────┐
         │Full Hasher│
         └─────┬─────┘
-              🡳 (Size, Hash, Path)
-      ┌────────────────┐
+              │ (Size, Hash, Path)
+      ┌───────┴────────┐
       │Full Hash Filter│
       └───────┬────────┘
-              ↓ (Size, Hash, Path)
-       ┌─────────────┐
+              │ (Size, Hash, Path)
+       ┌──────┴──────┐
        │TestCollector│
        └────┬─┬──────┘
             │ │
             │ └────→ (collisions.json)
             ├─────────────────────┐
-            ↓                     │
-      ┌────────────────────────┐  │
-      │ Byte-by-byte comparison│  │
-      └─────┬──────────────────┘  │
+            │                     │
+      ┌─────┴─────────────────┐   │
+      │Byte-by-byte comparison│   │
+      └─────┬─────────────────┘   │
             │                     │
             ├─────────────────────┘
-            ↓
-      ┌────────────────┐
+            │
+      ┌─────┴──────────┐
       │Command Executor│
       └────────────────┘
 ```
