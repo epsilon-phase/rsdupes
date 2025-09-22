@@ -77,6 +77,9 @@ struct FileSizeFilter {
 impl Actor for FileSizeFilter {
     async fn operate(&mut self) {
         while let Some((path, meta)) = self.receiver.recv().await {
+            if meta.size() == 0 {
+                continue;
+            }
             match self.seen.get_mut(&meta.size()) {
                 Some(x) => {
                     if x.is_some() {
@@ -319,8 +322,7 @@ impl TestCollector {
                 );
             }
         }
-        serde_json::to_writer_pretty(std::fs::File::create(output_path).unwrap(), &map)
-            .unwrap();
+        serde_json::to_writer_pretty(std::fs::File::create(output_path).unwrap(), &map).unwrap();
     }
 }
 impl Actor for TestCollector {
@@ -362,25 +364,27 @@ struct FileExclusionFilter {
 impl Actor for FileExclusionFilter {
     async fn operate(&mut self) {
         let mut vec = Vec::new();
-        while let read= self.reciever.recv_many(&mut vec, 100).await && read >0{
+        while let read = self.reciever.recv_many(&mut vec, 100).await
+            && read > 0
+        {
             for x in vec.drain(..read) {
                 if self.excluded_extensions.is_some()
                     && self
-                    .excluded_extensions
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .any(|ext| x.extension().is_some_and(|x| *ext == *x.to_string_lossy()))
+                        .excluded_extensions
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|ext| x.extension().is_some_and(|x| *ext == *x.to_string_lossy()))
                 {
                     continue;
                 }
                 if self.included_extensions.is_some()
                     && !self
-                    .included_extensions
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .any(|ext| x.extension().is_some_and(|x| *x.to_string_lossy() == *ext))
+                        .included_extensions
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|ext| x.extension().is_some_and(|x| *x.to_string_lossy() == *ext))
                 {
                     continue;
                 }
@@ -399,7 +403,10 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
     let (full_filter_sender, full_filter_recv) = unbounded_channel();
     let (collector_sender, collector_reciever) = unbounded_channel();
     let mut js = JoinSet::new();
-    let path = args.directory_entry_point.clone().unwrap_or(PathBuf::from("."));
+    let path = args
+        .directory_entry_point
+        .clone()
+        .unwrap_or(PathBuf::from("."));
     {
         let needs_filter = args.excluded_extensions.is_some() || args.included_extensions.is_some();
         js.spawn(async move {
