@@ -5,16 +5,20 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::VecDeque;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::Metadata;
 use std::io;
+use std::io::Read;
 use std::io::SeekFrom;
 use std::io::Write;
+use std::io::stdin;
+use std::io::stdout;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::fs::*;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc::*;
 use tokio::task::JoinSet;
 pub trait Actor {
@@ -392,31 +396,19 @@ impl Actor for FileExclusionFilter {
         }
     }
 }
+#[derive(Clone, Debug)]
+struct DuplicateMessage {
+    original: PathBuf,
+    duplicate: PathBuf,
+}
 struct BytewiseFileComparator {
     // =S
-    map: BTreeMap<u64, BTreeMap<GenericArray<u8, typenum::U32>, BTreeMap<PathBuf, Vec<PathBuf>>>>,
+    map: BTreeMap<u64, BTreeMap<GenericArray<u8, typenum::U32>, BTreeSet<PathBuf>>>,
     receiver: ActorReceiver<FullHashMessage>,
+    // A broadcast, just in case I figure out why to send it to more than one actor.
+    sender: tokio::sync::broadcast::Sender<DuplicateMessage>,
 }
-impl BytewiseFileComparator {
-    fn to_file(&self) {
-        let mut map: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<String>>>> =
-            BTreeMap::new();
-        for (size, hashes) in self.map.iter() {
-            let new_hashes = map.entry(size.to_string()).or_default();
-            for (hash, path) in hashes.iter() {
-                let path_bucket = new_hashes.entry(format!("{:x}", hash)).or_default();
-                for (first_found, other_files) in path.iter() {
-                    let x = path_bucket
-                        .entry(first_found.to_string_lossy().to_string())
-                        .or_default();
-                    x.extend(other_files.iter().map(|x| x.to_string_lossy().to_string()));
-                }
-            }
-        }
-        let x = std::fs::File::create("duplicates.json").unwrap();
-        serde_json::to_writer_pretty(x, &map).unwrap();
-    }
-}
+
 impl Actor for BytewiseFileComparator {
     async fn operate(&mut self) {
         while let Some(msg) = self.receiver.recv().await {
@@ -428,7 +420,7 @@ impl Actor for BytewiseFileComparator {
             let top = self.map.entry(msg.file_size).or_default();
             let hash = top.entry(msg.hash).or_default();
             let mut found_match = None;
-            for key in hash.keys() {
+            for key in hash.iter() {
                 let a = fmmap::tokio::AsyncMmapFile::open(&key).await.unwrap();
                 if a.as_slice() == b.as_slice() {
                     found_match = Some(key);
@@ -441,14 +433,94 @@ impl Actor for BytewiseFileComparator {
                     msg.path.to_string_lossy(),
                     found_match.unwrap().to_string_lossy()
                 );
-                hash.entry(found_match.cloned().unwrap())
-                    .or_default()
-                    .push(msg.path.clone());
+                self.sender
+                    .send(DuplicateMessage {
+                        original: found_match.cloned().unwrap(),
+                        duplicate: msg.path,
+                    })
+                    .unwrap();
             } else {
-                hash.entry(msg.path).or_default();
+                hash.insert(msg.path);
             }
         }
-        self.to_file();
+    }
+}
+
+struct HardLinker {
+    reciever: tokio::sync::broadcast::Receiver<DuplicateMessage>,
+    confirm_actions: bool,
+}
+impl Actor for HardLinker {
+    async fn operate(&mut self) {
+        let term = console::Term::stdout();
+        loop {
+            let msg = self.reciever.recv().await;
+            if let Err(RecvError::Closed) = msg {
+                break;
+            }
+            let msg = msg.unwrap();
+            println!(
+                "Linking {} to {}",
+                msg.duplicate.to_string_lossy(),
+                msg.original.to_string_lossy()
+            );
+            if self.confirm_actions {
+                println!(
+                    "Do you want to link {} to {}?",
+                    msg.duplicate.to_string_lossy(),
+                    msg.original.to_string_lossy()
+                );
+                let response = term.read_char().unwrap();
+                if response != 'y' {
+                    continue;
+                }
+            }
+            let mut backup = msg.duplicate.clone();
+            let mut ext = backup
+                .extension()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            ext.push_str(".bak");
+            backup.set_extension(ext);
+            rename(&msg.duplicate, &backup).await.unwrap();
+            if let Err(e) = hard_link(&msg.original, &msg.duplicate).await {
+                eprintln!("Link error {}", e);
+                rename(&backup, &msg.duplicate).await;
+            } else {
+                remove_file(&backup).await;
+                println!(
+                    "Linked {} to {}",
+                    msg.duplicate.to_string_lossy(),
+                    msg.original.to_string_lossy()
+                )
+            }
+        }
+    }
+}
+struct JsonDumper {
+    reciever: tokio::sync::broadcast::Receiver<DuplicateMessage>,
+    map: BTreeMap<String, Vec<String>>,
+    output: PathBuf,
+}
+impl Actor for JsonDumper {
+    async fn operate(&mut self) {
+        use tokio::sync::broadcast;
+        //We want to panic early in this because otherwise it's all for naught
+        let file = std::fs::File::create(&self.output).unwrap();
+        loop {
+            let msg = self.reciever.recv().await;
+            if let Err(RecvError::Closed) = msg {
+                break;
+            }
+            let msg = msg.unwrap();
+            let list = self
+                .map
+                .entry(msg.original.to_string_lossy().to_string())
+                .or_default();
+            list.push(msg.duplicate.to_string_lossy().to_string());
+        }
+        serde_json::to_writer_pretty(file, &self.map);
     }
 }
 pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
@@ -460,6 +532,7 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
     let (full_hash_sender, full_hash_recv) = unbounded_channel();
     let (full_filter_sender, full_filter_recv) = unbounded_channel();
     let (collector_sender, collector_reciever) = unbounded_channel();
+    let (duplicate_sender, duplicate_recv) = tokio::sync::broadcast::channel(100);
     let mut js = JoinSet::new();
     let path = args
         .directory_entry_point
@@ -560,13 +633,40 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
         full_filter.operate().await;
         println!("Full filter ended?");
     });
-    js.spawn(async move {
-        let mut tc = BytewiseFileComparator {
-            map: BTreeMap::new(),
-            receiver: collector_reciever,
-        };
-        tc.operate().await;
-    });
+    {
+        let duplicate_sender = duplicate_sender.clone();
+        js.spawn(async move {
+            let mut tc = BytewiseFileComparator {
+                map: BTreeMap::new(),
+                receiver: collector_reciever,
+                sender: duplicate_sender,
+            };
+            tc.operate().await;
+        });
+    }
+    if args.hard_link {
+        let confirm = args.confirm_actions;
+        println!("Starting hard linker");
+        js.spawn(async move {
+            let mut tc = HardLinker {
+                confirm_actions: confirm,
+                reciever: duplicate_recv,
+            };
+            tc.operate().await;
+        });
+    }
+    if let Some(path) = args.json_dump.as_ref() {
+        let path = path.clone();
+        let recv = duplicate_sender.subscribe();
+        js.spawn(async move {
+            let mut tc = JsonDumper {
+                map: BTreeMap::new(),
+                output: path,
+                reciever: recv,
+            };
+            tc.operate().await;
+        });
+    }
 
     js
 }

@@ -34,6 +34,17 @@ struct Args {
     /// if you are seeking to deduplicate larger files
     #[arg(short, long, default_value_t = 1)]
     minimum_size: u64,
+    /// Replace duplicates with hardlinks.
+    /// This is dangerous fun if you aren't careful.
+    ///
+    /// Run with Confirm-mode if you want to approve it
+    #[arg(short, long)]
+    hard_link: bool,
+    #[arg(short, default_value_t = false)]
+    confirm_actions: bool,
+    /// Write duplicates to a file.
+    #[arg(short, long)]
+    json_dump: Option<PathBuf>,
 }
 fn main() {
     let args = Args::parse();
