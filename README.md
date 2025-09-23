@@ -5,7 +5,8 @@ Current functionality:
   1. Filters files based on size into buckets
   2. Filters those buckets into partial hashes(SHA256)
   3. Filters those partial hashed buckets into completely hashed buckets
-  4. Prints those collisions into a big json file.
+  4. Filters those fully hashed files and compares them byte by byte into buckets.
+  5. Writes a json file.
 
 Future functionality:
 * Invoke on a single directory
@@ -46,7 +47,10 @@ Future functionality:
 {
   "<file_size>": {
     "<HASH>": [
-      "PATH",...
+      "PATH":[
+        "DUPLICATE",
+        "DUPLICATE2"
+      ],...
     ],
     ...
   }
@@ -57,7 +61,7 @@ Future functionality:
 ```
 ┌────────────────────────────┐
 │ Filesystem recursion actor │
-└─────────────┬──────────────┘    ┌───────────────┐    
+└─────────────┬──────────────┘    ┌───────────────┐
               ├───────────────────┤FileFilterActor│
               │ (File Paths)      └───────┬───────┘
               │                           │

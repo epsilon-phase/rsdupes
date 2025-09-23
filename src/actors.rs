@@ -1,5 +1,7 @@
+use fmmap::tokio::AsyncMmapFileExt;
 use generic_array::GenericArray;
 use generic_array::typenum;
+use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::VecDeque;
@@ -349,12 +351,6 @@ impl Actor for TestCollector {
         self.write_to_file("collisions.json");
     }
 }
-pub struct BytewiseFileComparator {
-    recv: ActorReceiver<FullHashMessage>,
-    sender: ActorSender<(PathBuf, Vec<PathBuf>)>,
-    // T Y P E S
-    map: BTreeMap<u64, BTreeMap<GenericArray<u8, typenum::U32>, BTreeMap<PathBuf, Vec<PathBuf>>>>,
-}
 
 struct FileExclusionFilter {
     reciever: ActorReceiver<PathBuf>,
@@ -392,6 +388,65 @@ impl Actor for FileExclusionFilter {
                 self.sender.send(x).unwrap();
             }
         }
+    }
+}
+struct BytewiseFileComparator {
+    // =S
+    map: BTreeMap<u64, BTreeMap<GenericArray<u8, typenum::U32>, BTreeMap<PathBuf, Vec<PathBuf>>>>,
+    receiver: ActorReceiver<FullHashMessage>,
+}
+impl BytewiseFileComparator {
+    fn to_file(&self) {
+        let mut map: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<String>>>> =
+            BTreeMap::new();
+        for (size, hashes) in self.map.iter() {
+            let new_hashes = map.entry(size.to_string()).or_default();
+            for (hash, path) in hashes.iter() {
+                let path_bucket = new_hashes.entry(format!("{:x}", hash)).or_default();
+                for (first_found, other_files) in path.iter() {
+                    let x = path_bucket
+                        .entry(first_found.to_string_lossy().to_string())
+                        .or_default();
+                    x.extend(other_files.iter().map(|x| x.to_string_lossy().to_string()));
+                }
+            }
+        }
+        let x = std::fs::File::create("duplicates.json").unwrap();
+        serde_json::to_writer_pretty(x, &map).unwrap();
+    }
+}
+impl Actor for BytewiseFileComparator {
+    async fn operate(&mut self) {
+        while let Some(msg) = self.receiver.recv().await {
+            let b = fmmap::tokio::AsyncMmapFile::open(&msg.path).await;
+            if b.is_err() {
+                continue;
+            }
+            let b = b.unwrap();
+            let top = self.map.entry(msg.file_size).or_default();
+            let hash = top.entry(msg.hash).or_default();
+            let mut found_match = None;
+            for key in hash.keys() {
+                let a = fmmap::tokio::AsyncMmapFile::open(&key).await.unwrap();
+                if a.as_slice() == b.as_slice() {
+                    found_match = Some(key);
+                    break;
+                }
+            }
+            if found_match.is_some() {
+                println!(
+                    "{} === {}",
+                    msg.path.to_string_lossy(),
+                    found_match.unwrap().to_string_lossy()
+                );
+                hash.entry(found_match.cloned().unwrap())
+                    .or_default()
+                    .push(msg.path.clone());
+            } else {
+                hash.entry(msg.path).or_default();
+            }
+        }
+        self.to_file();
     }
 }
 pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
@@ -504,9 +559,9 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
         println!("Full filter ended?");
     });
     js.spawn(async move {
-        let mut tc = TestCollector {
+        let mut tc = BytewiseFileComparator {
             map: BTreeMap::new(),
-            reciever: collector_reciever,
+            receiver: collector_reciever,
         };
         tc.operate().await;
     });
