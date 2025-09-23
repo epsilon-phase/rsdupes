@@ -48,6 +48,11 @@ struct Args {
 }
 fn main() {
     let args = Args::parse();
+    if !args.hard_link && args.json_dump.is_none() {
+        println!(
+            "Specify -h or -j to make this program carry out an action. This will just print duplicates"
+        );
+    }
     let runtime = if args.single_thread {
         tokio::runtime::Builder::new_current_thread()
             .max_blocking_threads(10)

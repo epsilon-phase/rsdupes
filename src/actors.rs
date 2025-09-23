@@ -433,12 +433,15 @@ impl Actor for BytewiseFileComparator {
                     msg.path.to_string_lossy(),
                     found_match.unwrap().to_string_lossy()
                 );
-                self.sender
-                    .send(DuplicateMessage {
-                        original: found_match.cloned().unwrap(),
-                        duplicate: msg.path,
-                    })
-                    .unwrap();
+                // This is necessary to permit just printing the results
+                if self.sender.receiver_count() > 0 {
+                    self.sender
+                        .send(DuplicateMessage {
+                            original: found_match.cloned().unwrap(),
+                            duplicate: msg.path,
+                        })
+                        .unwrap();
+                }
             } else {
                 hash.insert(msg.path);
             }
@@ -459,11 +462,6 @@ impl Actor for HardLinker {
                 break;
             }
             let msg = msg.unwrap();
-            println!(
-                "Linking {} to {}",
-                msg.duplicate.to_string_lossy(),
-                msg.original.to_string_lossy()
-            );
             if self.confirm_actions {
                 println!(
                     "Do you want to link {} to {}?",
