@@ -9,33 +9,6 @@ mod actors;
 // #[global_allocator]
 // static GLOBAL: MiMalloc = MiMalloc;
 
-use crate::file_selector::{
-    FilePartialHashSelector, FileSizeSelector, FullHashSelector, hasher_pipeline,
-};
-mod file_selector;
-async fn go_inside(
-    directory: PathBuf,
-    sender: tokio::sync::mpsc::Sender<std::path::PathBuf>,
-) -> () {
-    if let Ok(mut directory) = tokio::fs::read_dir(&directory).await {
-        while let Ok(Some(file)) = directory.next_entry().await {
-            match file.file_type().await {
-                Ok(filetype) => {
-                    if filetype.is_dir() {
-                        let path = Arc::new(file.path().clone());
-                        let send = sender.clone();
-                        tokio::spawn(async move {
-                            go_inside(path.to_path_buf(), send).await;
-                        });
-                    } else if filetype.is_file() {
-                        sender.send(file.path()).await.unwrap();
-                    }
-                }
-                Err(_e) => {}
-            }
-        }
-    }
-}
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {

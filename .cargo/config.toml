@@ -1,2 +1,2 @@
 [build]
-rustflags=["-Znext-solver"]
+# rustflags=["-Znext-solver"]

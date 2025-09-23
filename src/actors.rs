@@ -361,9 +361,11 @@ struct FileExclusionFilter {
 impl Actor for FileExclusionFilter {
     async fn operate(&mut self) {
         let mut vec = Vec::new();
-        while let read = self.reciever.recv_many(&mut vec, 100).await
-            && read > 0
-        {
+        loop {
+            let read = self.reciever.recv_many(&mut vec, 100).await;
+            if read == 0 {
+                break;
+            }
             for x in vec.drain(..read) {
                 if self.excluded_extensions.is_some()
                     && self
