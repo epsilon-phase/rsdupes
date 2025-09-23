@@ -58,7 +58,8 @@ struct Args {
     /// as they are sometimes used as program flags or program specific scratch space.
     ///
     /// In general, it is best to set this to at least a multiple of the filesystem's block size
-    #[arg(short, long, default_value_t=1)]
+    /// if you are seeking to deduplicate larger files
+    #[arg(short, long, default_value_t = 1)]
     minimum_size: u64,
 }
 fn main() {

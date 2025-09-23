@@ -78,7 +78,7 @@ struct FileSizeFilter {
 impl Actor for FileSizeFilter {
     async fn operate(&mut self) {
         while let Some((path, meta)) = self.receiver.recv().await {
-            if meta.size() >= self.minimum_size {
+            if meta.size() < self.minimum_size {
                 continue;
             }
             match self.seen.get_mut(&meta.size()) {
@@ -457,6 +457,7 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
         // Ahh, the necessities of async programming.
         // At least I can't blame it all on rust
         let min_size = args.minimum_size;
+        println!("Minimimum_size {min_size}");
         js.spawn(async move {
             let mut file_filter = FileSizeFilter {
                 receiver: size_recv,
