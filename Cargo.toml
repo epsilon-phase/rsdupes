@@ -2,6 +2,8 @@
 name = "rsdupes"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+author = "epsilon-phase"
 [rustc]
 flags=['-Znext-solver']
 
@@ -15,6 +17,7 @@ generic-array = {version='0.14.7',features=['serde']}
 clap = { version = "4.5.47", features = ["derive"] }
 fmmap = {version = "^0.4.0", features = ["tokio"]}
 glob = {version = "0.3.3"}
+
 [profile.reldebug]
 inherits = "release"
 debug=true
