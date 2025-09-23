@@ -47,12 +47,14 @@ struct Args {
     #[arg(value_name = "DIRECTORY")]
     directory_entry_point: Option<PathBuf>,
     /// File extensions to limit operation to.
-    #[arg(short,long)]
+    #[arg(short, long)]
     included_extensions: Option<Vec<String>>,
     /// File extensions to explicitly disinclude
     /// Not sensible to combine with desired extensions, but should work just fine.
-    #[arg(short,long)]
-    excluded_extensions: Option<Vec<String>>
+    #[arg(short, long)]
+    excluded_extensions: Option<Vec<String>>,
+    #[arg(short, long)]
+    minimum_size: Option<u64>,
 }
 fn main() {
     let args = Args::parse();
@@ -69,7 +71,7 @@ fn main() {
     .unwrap();
     runtime.block_on(async move {
         use actors::Actor;
-        
+
         let mut js = actors::run_actors(&&args);
         while !js.is_empty() {
             js.join_next().await;

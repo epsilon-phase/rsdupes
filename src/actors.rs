@@ -73,11 +73,13 @@ struct FileSizeFilter {
     seen: HashMap<u64, Option<PathBuf>>,
     receiver: ActorReceiver<(PathBuf, Metadata)>,
     sender: ActorSender<FileSizeMessage>,
+    minimum_size: Option<u64>,
 }
 impl Actor for FileSizeFilter {
     async fn operate(&mut self) {
+        let minimum_size = self.minimum_size.unwrap_or(1);
         while let Some((path, meta)) = self.receiver.recv().await {
-            if meta.size() == 0 {
+            if meta.size() >= minimum_size {
                 continue;
             }
             match self.seen.get_mut(&meta.size()) {
@@ -452,14 +454,20 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
             });
         }
     }
-    js.spawn(async move {
-        let mut file_filter = FileSizeFilter {
-            receiver: size_recv,
-            sender: size_filter_sender,
-            seen: HashMap::default(),
-        };
-        file_filter.operate().await;
-    });
+    {
+        // Ahh, the necessities of async programming.
+        // At least I can't blame it all on rust
+        let min_size = args.minimum_size;
+        js.spawn(async move {
+            let mut file_filter = FileSizeFilter {
+                receiver: size_recv,
+                sender: size_filter_sender,
+                seen: HashMap::default(),
+                minimum_size: min_size,
+            };
+            file_filter.operate().await;
+        });
+    }
     js.spawn(async move {
         let mut partial_hasher = PartialHasher {
             reciever: size_filter_recv,
