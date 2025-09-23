@@ -73,13 +73,12 @@ struct FileSizeFilter {
     seen: HashMap<u64, Option<PathBuf>>,
     receiver: ActorReceiver<(PathBuf, Metadata)>,
     sender: ActorSender<FileSizeMessage>,
-    minimum_size: Option<u64>,
+    minimum_size: u64,
 }
 impl Actor for FileSizeFilter {
     async fn operate(&mut self) {
-        let minimum_size = self.minimum_size.unwrap_or(1);
         while let Some((path, meta)) = self.receiver.recv().await {
-            if meta.size() >= minimum_size {
+            if meta.size() >= self.minimum_size {
                 continue;
             }
             match self.seen.get_mut(&meta.size()) {

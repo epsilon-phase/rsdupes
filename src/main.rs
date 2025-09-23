@@ -28,7 +28,6 @@ async fn go_inside(
                             go_inside(path.to_path_buf(), send).await;
                         });
                     } else if filetype.is_file() {
-                        // println!("{}", file.path().to_string_lossy());
                         sender.send(file.path()).await.unwrap();
                     }
                 }
@@ -53,8 +52,14 @@ struct Args {
     /// Not sensible to combine with desired extensions, but should work just fine.
     #[arg(short, long)]
     excluded_extensions: Option<Vec<String>>,
-    #[arg(short, long)]
-    minimum_size: Option<u64>,
+    /// Exclude files below a specified number of bytes.
+    ///
+    /// Defaults to 1, specify zero to include zero length files, which can be dangerous
+    /// as they are sometimes used as program flags or program specific scratch space.
+    ///
+    /// In general, it is best to set this to at least a multiple of the filesystem's block size
+    #[arg(short, long, default_value_t=1)]
+    minimum_size: u64,
 }
 fn main() {
     let args = Args::parse();
@@ -77,56 +82,4 @@ fn main() {
             js.join_next().await;
         }
     })
-    // runtime.block_on(async {
-    //     let mut channel = tokio::sync::mpsc::channel(100);
-    //     runtime.spawn(go_inside(args.directory_entry_point.unwrap_or(PathBuf::from(".")), channel.0));
-
-    //     let mut thing = file_selector::FileSizeSelector::default();
-    //     thing.run_collection(&mut channel.1).await;
-    //     let mut size = 0;
-    //     for (k, v) in thing.by_sizes.iter() {
-    //         println!("{k}\n\t{}", v.len());
-    //         size += v.len();
-    //     }
-    //     println!("Total files under consideration {size}");
-    //     let mut full_collisions = 0;
-    //     let mut max_bucket_size = 0;
-    //     let mut full_collision_buckets = hasher_pipeline(&thing.by_sizes).await;
-    //     full_collision_buckets.sort_by_key(|x|x.0);
-    //     for i in full_collision_buckets.iter() {
-    //         for (_, bucket) in i.1.by_hash.iter() {
-    //             max_bucket_size = max_bucket_size.max(bucket.len());
-    //             full_collisions += bucket.len();
-    //         }
-    //     }
-    //     println!("Found {full_collisions} full sha256 collisions, largest bucket contains {max_bucket_size} items");
-    //     let file = tokio::fs::File::create("collisions.json").await;
-    //     if let Ok(file) = file{
-    //         serde_json::to_writer_pretty(file.into_std().await, &full_collision_buckets).unwrap();
-    //     }else{
-    //         println!("Error! {}", file.err().unwrap());
-    //     }
-    //     // let mut potential_collisions = 0;
-    //     // for mut i in partial_hashes.join_all().await {
-    //     //     for (hash, bucket) in i.by_hash.drain() {
-    //     //         potential_collisions += bucket.len();
-    //     //         if bucket.len() > 0 {
-    //     //             println!(
-    //     //                 "First item of a non-1 bucket {}",
-    //     //                 bucket[0].to_string_lossy()
-    //     //             );
-    //     //         }
-    //     //         full_hashes.spawn(FullHashSelector::from_path_bucket(bucket));
-    //     //     }
-    //     // }
-
-    //     // println!("There are {potential_collisions} partial hash collisions");
-    //     // let mut collisions = 0;
-    //     // for mut i in full_hashes.join_all().await.drain(..) {
-    //     //     for (k, v) in i.by_hash.drain() {
-    //     //         collisions += v.len();
-    //     //     }
-    //     // }
-    //     // println!("There are still {collisions}");
-    // });
 }
