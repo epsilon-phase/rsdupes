@@ -229,29 +229,46 @@ impl FullHashMessage {
                 path: msg.path,
             };
         }
-        let file = File::open(&msg.path).await;
-        match file {
-            Ok(mut file) => {
-                file.seek(SeekFrom::Start(msg.bytes_read as u64))
-                    .await
-                    .unwrap();
-                let mut buffer: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
-                while let Ok(bytes_read) = file.read(&mut buffer).await {
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    msg.hasher.write_all(&buffer[..bytes_read]).unwrap();
+        let fmap = fmmap::tokio::AsyncMmapFile::open(&msg.path).await;
+        match fmap{
+            Ok(mapped)=>{
+                // Oh mmap, how did I ever live without you? <3
+                let data = std::io::IoSlice::new(&mapped.as_slice()[msg.bytes_read..]);
+                let written = msg.hasher.write_vectored(&[data]).unwrap();
+                assert_eq!(written,mapped.len()-msg.bytes_read);
+                FullHashMessage{
+                    file_size:msg.file_size,
+                    hash:msg.hasher.finalize(),
+                    path: msg.path
                 }
-                FullHashMessage {
-                    file_size: msg.file_size,
-                    hash: msg.hasher.finalize(),
-                    path: msg.path,
-                }
-            }
-            Err(error) => {
+            },
+            Err(error)=>{
                 panic!("{}", error);
             }
         }
+        // let file = File::open(&msg.path).await;
+        // match file {
+        //     Ok(mut file) => {
+        //         file.seek(SeekFrom::Start(msg.bytes_read as u64))
+        //             .await
+        //             .unwrap();
+        //         let mut buffer: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
+        //         while let Ok(bytes_read) = file.read(&mut buffer).await {
+        //             if bytes_read == 0 {
+        //                 break;
+        //             }
+        //             msg.hasher.write_all(&buffer[..bytes_read]).unwrap();
+        //         }
+        //         FullHashMessage {
+        //             file_size: msg.file_size,
+        //             hash: msg.hasher.finalize(),
+        //             path: msg.path,
+        //         }
+        //     }
+        //     Err(error) => {
+        //         panic!("{}", error);
+        //     }
+        // }
     }
 }
 struct FullHasher {
