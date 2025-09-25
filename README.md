@@ -5,8 +5,11 @@ Current functionality:
   1. Filters files based on size into buckets
   2. Filters those buckets into partial hashes(SHA256)
   3. Filters those partial hashed buckets into completely hashed buckets
-  4. Filters those fully hashed files and compares them byte by byte into buckets.
-  5. Writes a json file.
+  4. Filters those fully hashed files and compares them byte by byte, merging duplicates.
+     into buckets. This is also where permissions are compared. Currently, permissions 
+     checks are only effective on unixes, but likely incomplete there.
+  5. (Optionally) links duplicates together
+  5. (Optionally) writes a json file
 
 Future functionality:
 * Invoke on a single directory
@@ -61,9 +64,9 @@ Future functionality:
 ```
 ┌────────────────────────────┐
 │ Filesystem recursion actor │
-└─────────────┬──────────────┘    ┌───────────────┐
-              ├───────────────────┤FileFilterActor│
-              │ (File Paths)      └───────┬───────┘
+└─────────────┬──────────────┘    ┌───────────────────┐
+              ├───────────────────┤FileExtensionFilter│
+              │ (File Paths)      └───────┬───────────┘
               │                           │
     ┌─────────┴────────┐                  │
     │Inode Deduplicator├──────────────────┘
@@ -74,37 +77,37 @@ Future functionality:
     └─────────┬────────────┘
               │ (File Paths)
      ┌────────┴───────┐
-     │ Partial hasher │
-     └────────┬───────┘
-              │
-              │  (Filesize,PartialHash,Path)
-              │
-┌─────────────┴───────────────┐
-│Partial Hash duplicate buffer│
-└─────────────┬───────────────┘
-              │
-        ┌─────┴─────┐
-        │Full Hasher│
-        └─────┬─────┘
-              │ (Size, Hash, Path)
-      ┌───────┴────────┐
-      │Full Hash Filter│
-      └───────┬────────┘
-              │ (Size, Hash, Path)
-       ┌──────┴──────┐
-       │TestCollector│
-       └────┬─┬──────┘
-            │ │
-            │ └────→ (collisions.json)
-            ├─────────────────────┐
-            │                     │
-      ┌─────┴─────────────────┐   │
-      │Byte-by-byte comparison│   │
-      └─────┬─────────────────┘   │
-            │                     │
-            ├─────────────────────┘
-            │
-      ┌─────┴──────────┐
-      │Command Executor│
-      └────────────────┘
+     │ Partial hasher ├───────────────────────┐
+     └────────┬───────┘                       │
+              │                      ┌────────┴─────────┐
+              │  (Filesize,          │StatusDisplayActor│
+              │   PartialHash,       └┬──┬─┬─┬──────────┘
+              │   Path)               ↑  ↑ │ │
+┌─────────────┴───────────────┐       │  │ │ │
+│Partial Hash duplicate buffer│       │  │ │ │
+└─────────────┬───────────────┘       │  │ │ │
+              │                       │  │ │ │
+        ┌─────┴─────┐                 │  │ │ │
+        │Full Hasher├─────────────────┘  │ │ │
+        └─────┬─────┘                    │ │ │
+              │ (Size, Hash, Path)       │ │ │
+      ┌───────┴────────┐                 │ │ │
+      │Full Hash Filter├─────────────────┘ │ │
+      └───────┬────────┘                   │ │
+              │ (Size, Hash, Path)         │ │
+              ├                            │ │
+              │                            │ │
+        ┌─────┴─────────────────┐          │ │
+        │Byte-by-byte comparison├──────────┘ │
+        └───┬───────────────────┘            │
+            │                                │
+            ├────────┐                       │
+            │        │                       │
+      ┌─────┴────┐   │                       │
+      │HardLinker├───│───────────────────────┘
+      └────┬─────┘   │
+           ├─────────┘
+      ┌────┴─────┐
+      │JsonDumper│
+      └──────────┘
 ```

@@ -1,11 +1,16 @@
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::error::ErrorKind;
+use clap::{Parser, command};
 use mimalloc::MiMalloc;
 use std::sync::{Arc, mpsc};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
+mod PartialHash;
+mod actor_types;
 mod actors;
+mod constants;
+mod file_discovery_actors;
 // #[global_allocator]
 // static GLOBAL: MiMalloc = MiMalloc;
 
@@ -31,8 +36,10 @@ struct Args {
     /// as they are sometimes used as program flags or program specific scratch space.
     ///
     /// In general, it is best to set this to at least a multiple of the filesystem's block size
-    /// if you are seeking to deduplicate larger files
-    #[arg(short, long, default_value_t = 1)]
+    /// if you are seeking to reclaim disk space.
+    ///
+    /// Supports suffixes T,G,M,K as well as Tib,Gib,Mib,Kib
+    #[arg(short, long, default_value_t = 1,value_parser=crate::parse_size)]
     minimum_size: u64,
     /// Replace duplicates with hardlinks.
     /// This is dangerous fun if you aren't careful.
@@ -40,11 +47,61 @@ struct Args {
     /// Run with Confirm-mode if you want to approve it
     #[arg(short, long)]
     hard_link: bool,
+    /// Confirm if you want to relink the files.
     #[arg(short, default_value_t = false)]
     confirm_actions: bool,
     /// Write duplicates to a file.
     #[arg(short, long)]
     json_dump: Option<PathBuf>,
+}
+#[cfg(test)]
+mod arg_tests {
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn test_size_parsing() {
+        use super::*;
+        let input = ["10gb", "1m", "1kb", "1k", "1kib"];
+        let expected: [u64; _] = [
+            10_000_000_000u64,
+            1_000_000u64,
+            1_000u64,
+            1_000u64,
+            1_024u64,
+        ];
+        for i in input.iter().zip(expected.iter()) {
+            assert_eq!(parse_size(i.0).unwrap(), *i.1);
+        }
+        assert!(parse_size("kib12").is_err());
+    }
+}
+fn parse_size(item: &str) -> Result<u64, clap::error::Error> {
+    let suffix = item.trim_start_matches(&['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']);
+    let number: u64 = if let Ok(num) = item.trim_end_matches(suffix).parse() {
+        num
+    } else {
+        return Err(clap::Error::raw(
+            ErrorKind::ValueValidation,
+            "Invalid number supplied for minimum size",
+        ));
+    };
+    let multiplier = match suffix {
+        "M" | "m" | "mb" | "Mb" => 1_000_000,
+        "Mib" | "mib" => 1024 * 1024,
+        "K" | "k" | "kb" | "Kb" => 1_000,
+        "Kib" | "kib" => 1024,
+        "G" | "g" | "gb" | "Gb" => 1_000_000_000,
+        "Gib" | "gib" => 1024 * 1024 * 1024,
+        "Tb" | "tb" | "t" | "T" => 1_000_000_000_000,
+        "tib" | "Tib" => 1024 * 1024 * 1024 * 1024,
+        _ => {
+            return Err(clap::error::Error::raw(
+                clap::error::ErrorKind::ValueValidation,
+                "Invalid suffix",
+            ));
+        }
+    };
+    Ok(number * multiplier)
 }
 fn main() {
     let args = Args::parse();
@@ -56,11 +113,13 @@ fn main() {
     let runtime = if args.single_thread {
         tokio::runtime::Builder::new_current_thread()
             .max_blocking_threads(10)
+            .enable_time()
             .build()
     } else {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(25)
             .max_blocking_threads(100)
+            .enable_time()
             .build()
     }
     .unwrap();

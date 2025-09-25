@@ -1,122 +1,29 @@
+use crate::actor_types::{ActorReceiver, ActorSender};
+use crate::actors::StatusUpdate::PartialHash;
+use crate::constants::{BLOCK_SIZE, MAX_HASHING_TASKS};
+use crate::file_discovery_actors::{
+    FileExclusionFilter, FileRecursionActor, FileSizeFilter, FileSizeMessage, INodeFilter,
+};
 use fmmap::tokio::AsyncMmapFileExt;
 use generic_array::GenericArray;
 use generic_array::typenum;
-use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs::Metadata;
 use std::io;
 use std::io::Read;
-use std::io::SeekFrom;
 use std::io::Write;
-use std::io::stdin;
-use std::io::stdout;
-use std::os::unix::fs::MetadataExt;
-use std::path::Path;
 use std::path::PathBuf;
 use tokio::fs::*;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::broadcast::error::RecvError;
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::*;
 use tokio::task::JoinSet;
+
 pub trait Actor {
     async fn operate(&mut self);
 }
-type ActorSender<T> = UnboundedSender<T>;
-type ActorReceiver<T> = UnboundedReceiver<T>;
-struct FileRecursionActor {
-    queue: VecDeque<PathBuf>,
-    sender: ActorSender<PathBuf>,
-}
 
-impl Actor for FileRecursionActor {
-    async fn operate(&mut self) {
-        while let Some(x) = self.queue.pop_front() {
-            if let Ok(mut dir) = read_dir(x).await {
-                while let Ok(Some(entry)) = dir.next_entry().await {
-                    // println!("{} - {}", entry.path().to_string_lossy(), count);
-                    if let Ok(info) = entry.file_type().await {
-                        if info.is_file() {
-                            // println!("{}", entry.path().to_string_lossy());
-                            self.sender.send(entry.path()).unwrap();
-                        } else if info.is_dir() {
-                            self.queue.push_back(entry.path());
-                        }
-                    }
-                }
-            } else {
-                println!("???");
-            }
-        }
-        println!("Crawling finished");
-    }
-}
-struct INodeFilter {
-    seen: HashSet<(u64, u64)>,
-    reciever: ActorReceiver<PathBuf>,
-    sender: ActorSender<(PathBuf, Metadata)>,
-}
-impl Actor for INodeFilter {
-    async fn operate(&mut self) {
-        while let Some(x) = self.reciever.recv().await {
-            if let Ok(meta) = metadata(&x).await {
-                let fuid = (meta.dev(), meta.ino());
-                if self.seen.insert(fuid) {
-                    self.sender.send((x, meta)).unwrap();
-                }
-            }
-        }
-        println!("Finished inodefilter");
-    }
-}
-struct FileSizeMessage {
-    path: PathBuf,
-    size: u64,
-}
-struct FileSizeFilter {
-    seen: HashMap<u64, Option<PathBuf>>,
-    receiver: ActorReceiver<(PathBuf, Metadata)>,
-    sender: ActorSender<FileSizeMessage>,
-    minimum_size: u64,
-}
-impl Actor for FileSizeFilter {
-    async fn operate(&mut self) {
-        while let Some((path, meta)) = self.receiver.recv().await {
-            if meta.size() < self.minimum_size {
-                continue;
-            }
-            match self.seen.get_mut(&meta.size()) {
-                Some(x) => {
-                    if x.is_some() {
-                        self.sender
-                            .send(FileSizeMessage {
-                                path: x.take().unwrap(),
-                                size: meta.size(),
-                            })
-                            .unwrap();
-                    }
-                    self.sender
-                        .send(FileSizeMessage {
-                            path,
-                            size: meta.size(),
-                        })
-                        .unwrap();
-                    self.seen.insert(meta.size(), None);
-                }
-
-                None => {
-                    self.seen.insert(meta.size(), Some(path));
-                }
-            }
-        }
-        println!("Finished file size filter");
-    }
-}
-// A lot of filesystems use this as their default size.
-const BLOCK_SIZE: usize = 4096;
-const MAX_HASHING_TASKS: usize = 300;
 #[derive(Clone)]
 struct PartialHashMessage {
     bytes_read: usize,
@@ -129,6 +36,7 @@ struct PartialHasher {
     reciever: ActorReceiver<FileSizeMessage>,
     sender: ActorSender<PartialHashMessage>,
     joinset: JoinSet<Option<PartialHashMessage>>,
+    display_channel: ActorSender<StatusUpdate>,
 }
 impl Actor for PartialHasher {
     async fn operate(&mut self) {
@@ -139,10 +47,11 @@ impl Actor for PartialHasher {
             //     self.reciever.len(),
             //     self.joinset.len()
             // );
+            let last_count = counter;
             let read_size = self.read_size;
             self.joinset.spawn(async move {
                 let mut ret = PartialHashMessage {
-                    bytes_read: read_size,
+                    bytes_read: 0,
                     file_size: msg.size,
                     hasher: Sha256::default(),
                     path: msg.path,
@@ -153,6 +62,7 @@ impl Actor for PartialHasher {
                     while read_remaining > 0 {
                         let b_size = read_remaining.min(BLOCK_SIZE);
                         let bytes_read = file.read(&mut buffer[..b_size]).await.unwrap();
+                        ret.bytes_read+=bytes_read;
                         read_remaining -= bytes_read;
                         ret.hasher.write_all(&buffer[..bytes_read]).unwrap();
                         if bytes_read == 0 {
@@ -162,7 +72,7 @@ impl Actor for PartialHasher {
                     }
                     Some(ret)
                 } else {
-                    println!("Failed to read file");
+                    // println!("Failed to read file");
                     None
                 }
             });
@@ -174,6 +84,7 @@ impl Actor for PartialHasher {
                     } else if let Some(Err(x)) = result {
                         eprintln!("Error! {}", x);
                     }
+
                     counter += 1;
                 }
             } else {
@@ -181,12 +92,13 @@ impl Actor for PartialHasher {
                 let former_len = self.joinset.len();
                 while let Some(Ok(Some(item))) = self.joinset.try_join_next() {
                     self.sender.send(item).unwrap();
-                    print!("\x1b[1F\x1b[K{counter}\n");
-                    io::stdout().flush();
+                    // print!("\x1b[1F\x1b[K{counter}\n");
+                    // io::stdout().flush();
                     assert!(self.joinset.len() < former_len);
                     counter += 1;
                 }
             }
+            self.display_channel.send(PartialHash(counter-last_count)).unwrap();
         }
         println!("Partial hashing finished");
     }
@@ -200,6 +112,7 @@ struct PartialHashFilter {
 impl Actor for PartialHashFilter {
     async fn operate(&mut self) {
         let mut temp_hasher = Sha256::default();
+
         while let Some(msg) = self.receiver.recv().await {
             msg.hasher.clone_into(&mut temp_hasher);
             let hash = temp_hasher.finalize_reset();
@@ -230,56 +143,35 @@ impl FullHashMessage {
             };
         }
         let fmap = fmmap::tokio::AsyncMmapFile::open(&msg.path).await;
-        match fmap{
-            Ok(mapped)=>{
+        match fmap {
+            Ok(mapped) => {
                 // Oh mmap, how did I ever live without you? <3
                 let data = std::io::IoSlice::new(&mapped.as_slice()[msg.bytes_read..]);
                 let written = msg.hasher.write_vectored(&[data]).unwrap();
-                assert_eq!(written,mapped.len()-msg.bytes_read);
-                FullHashMessage{
-                    file_size:msg.file_size,
-                    hash:msg.hasher.finalize(),
-                    path: msg.path
+                assert_eq!(written, mapped.len() - msg.bytes_read);
+                FullHashMessage {
+                    file_size: msg.file_size,
+                    hash: msg.hasher.finalize(),
+                    path: msg.path,
                 }
-            },
-            Err(error)=>{
+            }
+            Err(error) => {
                 panic!("{}", error);
             }
         }
-        // let file = File::open(&msg.path).await;
-        // match file {
-        //     Ok(mut file) => {
-        //         file.seek(SeekFrom::Start(msg.bytes_read as u64))
-        //             .await
-        //             .unwrap();
-        //         let mut buffer: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
-        //         while let Ok(bytes_read) = file.read(&mut buffer).await {
-        //             if bytes_read == 0 {
-        //                 break;
-        //             }
-        //             msg.hasher.write_all(&buffer[..bytes_read]).unwrap();
-        //         }
-        //         FullHashMessage {
-        //             file_size: msg.file_size,
-        //             hash: msg.hasher.finalize(),
-        //             path: msg.path,
-        //         }
-        //     }
-        //     Err(error) => {
-        //         panic!("{}", error);
-        //     }
-        // }
     }
 }
 struct FullHasher {
     receiver: ActorReceiver<PartialHashMessage>,
     sender: ActorSender<FullHashMessage>,
     joinset: JoinSet<FullHashMessage>,
+    display_sender: ActorSender<StatusUpdate>,
 }
 impl Actor for FullHasher {
     async fn operate(&mut self) {
         while let Some(msg) = self.receiver.recv().await {
             self.joinset.spawn(FullHashMessage::from_partial_hash(msg));
+            self.display_sender.send(StatusUpdate::FullHash(1)).unwrap();
             if self.joinset.len() > MAX_HASHING_TASKS {
                 self.sender
                     .send(self.joinset.join_next().await.unwrap().unwrap())
@@ -373,46 +265,6 @@ impl Actor for TestCollector {
     }
 }
 
-struct FileExclusionFilter {
-    reciever: ActorReceiver<PathBuf>,
-    sender: ActorSender<PathBuf>,
-    excluded_extensions: Option<Vec<String>>,
-    included_extensions: Option<Vec<String>>,
-}
-impl Actor for FileExclusionFilter {
-    async fn operate(&mut self) {
-        let mut vec = Vec::new();
-        loop {
-            let read = self.reciever.recv_many(&mut vec, 100).await;
-            if read == 0 {
-                break;
-            }
-            for x in vec.drain(..read) {
-                if self.excluded_extensions.is_some()
-                    && self
-                        .excluded_extensions
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .any(|ext| x.extension().is_some_and(|x| *ext == *x.to_string_lossy()))
-                {
-                    continue;
-                }
-                if self.included_extensions.is_some()
-                    && !self
-                        .included_extensions
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .any(|ext| x.extension().is_some_and(|x| *x.to_string_lossy() == *ext))
-                {
-                    continue;
-                }
-                self.sender.send(x).unwrap();
-            }
-        }
-    }
-}
 #[derive(Clone, Debug)]
 struct DuplicateMessage {
     original: PathBuf,
@@ -423,13 +275,20 @@ struct BytewiseFileComparator {
     map: BTreeMap<u64, BTreeMap<GenericArray<u8, typenum::U32>, BTreeSet<PathBuf>>>,
     receiver: ActorReceiver<FullHashMessage>,
     // A broadcast, just in case I figure out why to send it to more than one actor.
-    sender: tokio::sync::broadcast::Sender<DuplicateMessage>,
+    sender: ActorSender<DuplicateMessage>,
+    display_sender: ActorSender<StatusUpdate>,
 }
 
 impl Actor for BytewiseFileComparator {
     async fn operate(&mut self) {
         while let Some(msg) = self.receiver.recv().await {
             let b = fmmap::tokio::AsyncMmapFile::open(&msg.path).await;
+            // Doing the permissions check here seems smart, but it's easy to imagine that this
+            // could end up being the wrong place.
+            //
+            // The other issue here is that it isn't suitable for windows, although I am not
+            // a frequent user of that system, I would rather support it properly.
+            let b_perms = metadata(&msg.path).await.unwrap().permissions();
             if b.is_err() {
                 continue;
             }
@@ -438,6 +297,10 @@ impl Actor for BytewiseFileComparator {
             let hash = top.entry(msg.hash).or_default();
             let mut found_match = None;
             for key in hash.iter() {
+                let a_perms = metadata(&key).await.unwrap().permissions();
+                if a_perms != b_perms{
+                    continue;
+                }
                 let a = fmmap::tokio::AsyncMmapFile::open(&key).await.unwrap();
                 if a.as_slice() == b.as_slice() {
                     found_match = Some(key);
@@ -445,13 +308,9 @@ impl Actor for BytewiseFileComparator {
                 }
             }
             if found_match.is_some() {
-                println!(
-                    "{} === {}",
-                    msg.path.to_string_lossy(),
-                    found_match.unwrap().to_string_lossy()
-                );
                 // This is necessary to permit just printing the results
-                if self.sender.receiver_count() > 0 {
+
+                if !self.sender.is_closed() {
                     self.sender
                         .send(DuplicateMessage {
                             original: found_match.cloned().unwrap(),
@@ -459,6 +318,7 @@ impl Actor for BytewiseFileComparator {
                         })
                         .unwrap();
                 }
+                self.display_sender.send(StatusUpdate::Duplicates(1));
             } else {
                 hash.insert(msg.path);
             }
@@ -467,18 +327,25 @@ impl Actor for BytewiseFileComparator {
 }
 
 struct HardLinker {
-    reciever: tokio::sync::broadcast::Receiver<DuplicateMessage>,
+    receiver: ActorReceiver<DuplicateMessage>,
     confirm_actions: bool,
+    forwarder: Option<ActorSender<DuplicateMessage>>,
+    display: ActorSender<StatusUpdate>,
 }
 impl Actor for HardLinker {
     async fn operate(&mut self) {
         let term = console::Term::stdout();
         loop {
-            let msg = self.reciever.recv().await;
-            if let Err(RecvError::Closed) = msg {
+            let msg = self.receiver.recv().await;
+            if msg.is_none() {
                 break;
             }
             let msg = msg.unwrap();
+            self.forwarder
+                .as_mut()
+                .inspect(|x| x.send(msg.clone()).unwrap());
+            // .. I don't think this is useful. It's impossible to read
+            // It needs to turn off the other printing to remain visible on the screen
             if self.confirm_actions {
                 println!(
                     "Do you want to link {} to {}?",
@@ -498,23 +365,22 @@ impl Actor for HardLinker {
                 .to_string();
             ext.push_str(".bak");
             backup.set_extension(ext);
+            // It should check here that both files are on the same device, as otherwise
+            // hard linking is impossible, an additional flag may then control whether or not
+            // a symbolic link is created instead.
             rename(&msg.duplicate, &backup).await.unwrap();
             if let Err(e) = hard_link(&msg.original, &msg.duplicate).await {
                 eprintln!("Link error {}", e);
-                rename(&backup, &msg.duplicate).await;
+                rename(&backup, &msg.duplicate).await.unwrap();
             } else {
-                remove_file(&backup).await;
-                println!(
-                    "Linked {} to {}",
-                    msg.duplicate.to_string_lossy(),
-                    msg.original.to_string_lossy()
-                )
+                remove_file(&backup).await.unwrap();
+                self.display.send(StatusUpdate::HardLinks(1)).unwrap();
             }
         }
     }
 }
 struct JsonDumper {
-    reciever: tokio::sync::broadcast::Receiver<DuplicateMessage>,
+    reciever: ActorReceiver<DuplicateMessage>,
     map: BTreeMap<String, Vec<String>>,
     output: PathBuf,
 }
@@ -525,7 +391,7 @@ impl Actor for JsonDumper {
         let file = std::fs::File::create(&self.output).unwrap();
         loop {
             let msg = self.reciever.recv().await;
-            if let Err(RecvError::Closed) = msg {
+            if msg.is_none() {
                 break;
             }
             let msg = msg.unwrap();
@@ -539,6 +405,7 @@ impl Actor for JsonDumper {
     }
 }
 pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
+    // TODO figure out how to make this less odious and difficult to manage.
     let (file_sender, file_recv) = unbounded_channel();
     let (file_ext_sender, file_ext_recv) = unbounded_channel();
     let (size_sender, size_recv) = unbounded_channel();
@@ -547,7 +414,7 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
     let (full_hash_sender, full_hash_recv) = unbounded_channel();
     let (full_filter_sender, full_filter_recv) = unbounded_channel();
     let (collector_sender, collector_reciever) = unbounded_channel();
-    let (duplicate_sender, duplicate_recv) = tokio::sync::broadcast::channel(100);
+    let (display_sender, display_receiver) = unbounded_channel();
     let mut js = JoinSet::new();
     let path = args
         .directory_entry_point
@@ -602,7 +469,6 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
         // Ahh, the necessities of async programming.
         // At least I can't blame it all on rust
         let min_size = args.minimum_size;
-        println!("Minimimum_size {min_size}");
         js.spawn(async move {
             let mut file_filter = FileSizeFilter {
                 receiver: size_recv,
@@ -613,15 +479,19 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
             file_filter.operate().await;
         });
     }
-    js.spawn(async move {
-        let mut partial_hasher = PartialHasher {
-            reciever: size_filter_recv,
-            sender: partial_hash_sender,
-            joinset: JoinSet::new(),
-            read_size: 4096,
-        };
-        partial_hasher.operate().await;
-    });
+    {
+        let display_sender = display_sender.clone();
+        js.spawn(async move {
+            let mut partial_hasher = PartialHasher {
+                reciever: size_filter_recv,
+                sender: partial_hash_sender,
+                joinset: JoinSet::new(),
+                read_size: 4096,
+                display_channel: display_sender,
+            };
+            partial_hasher.operate().await;
+        });
+    }
     js.spawn(async move {
         let mut hash_filter = PartialHashFilter {
             receiver: partial_filter_recv,
@@ -630,58 +500,150 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
         };
         hash_filter.operate().await;
     });
-    js.spawn(async move {
-        let mut full_hasher = FullHasher {
-            joinset: JoinSet::new(),
-            receiver: full_hash_recv,
-            sender: full_filter_sender,
-        };
-        full_hasher.operate().await;
-    });
+    {
+        let display_sender = display_sender.clone();
+        js.spawn(async move {
+            let mut full_hasher = FullHasher {
+                joinset: JoinSet::new(),
+                receiver: full_hash_recv,
+                sender: full_filter_sender,
+                display_sender: display_sender,
+            };
+            full_hasher.operate().await;
+        });
+    }
     js.spawn(async move {
         let mut full_filter = FullHashFilter {
             receiver: full_filter_recv,
             sender: collector_sender,
             seen: HashMap::new(),
         };
-        println!("Starting full hash filter");
         full_filter.operate().await;
-        println!("Full filter ended?");
     });
+    let (duplicate_sender, duplicate_recv) = unbounded_channel();
     {
-        let duplicate_sender = duplicate_sender.clone();
+        let display_sender = display_sender.clone();
         js.spawn(async move {
             let mut tc = BytewiseFileComparator {
                 map: BTreeMap::new(),
                 receiver: collector_reciever,
                 sender: duplicate_sender,
+                display_sender: display_sender,
             };
             tc.operate().await;
         });
     }
-    if args.hard_link {
+    let duplicate_recv = if args.hard_link {
+        let display_sender = display_sender.clone();
+        let json_dump = args.json_dump.is_some();
         let confirm = args.confirm_actions;
         println!("Starting hard linker");
+        let (forwarder_sender, forwarder_recv) = unbounded_channel();
         js.spawn(async move {
             let mut tc = HardLinker {
                 confirm_actions: confirm,
+                receiver: duplicate_recv,
+                forwarder: if json_dump {
+                    Some(forwarder_sender)
+                } else {
+                    None
+                },
+                display: display_sender,
+            };
+            tc.operate().await;
+        });
+        forwarder_recv
+    } else {
+        duplicate_recv
+    };
+    if let Some(path) = args.json_dump.as_ref() {
+        let path = path.clone();
+
+        js.spawn(async move {
+            let mut tc = JsonDumper {
+                map: BTreeMap::new(),
+                output: path,
                 reciever: duplicate_recv,
             };
             tc.operate().await;
         });
     }
-    if let Some(path) = args.json_dump.as_ref() {
-        let path = path.clone();
-        let recv = duplicate_sender.subscribe();
-        js.spawn(async move {
-            let mut tc = JsonDumper {
-                map: BTreeMap::new(),
-                output: path,
-                reciever: recv,
-            };
-            tc.operate().await;
-        });
-    }
+    js.spawn(async move{
+        StatusDisplay{
+            status:StatusData::default(),
+            receiver:display_receiver
+        }.operate().await;
+    });
 
     js
+}
+enum StatusUpdate {
+    PartialHash(usize),
+    FullHash(usize),
+    Duplicates(usize),
+    HardLinks(usize),
+}
+#[derive(Default)]
+struct StatusData {
+    partial_hashes: usize,
+    full_hashes: usize,
+    duplicates: usize,
+    hardlinks: usize,
+}
+impl StatusData {
+    fn merge_status(&mut self, data: StatusUpdate) {
+        match data {
+            StatusUpdate::Duplicates(n) => self.duplicates += n,
+            StatusUpdate::HardLinks(n) => self.hardlinks += n,
+            StatusUpdate::PartialHash(n) => self.partial_hashes += n,
+            StatusUpdate::FullHash(n) => self.full_hashes += n,
+        }
+    }
+}
+struct StatusDisplay {
+    receiver: ActorReceiver<StatusUpdate>,
+    status: StatusData,
+}
+impl Actor for StatusDisplay {
+    async fn operate(&mut self) {
+        let term = console::Term::stdout();
+        let mut buffer = Vec::with_capacity(100);
+        let partial_style = console::style("Partial hashes").bold();
+        let full_style = console::style("Full hashes").bold().green();
+        let duplicates_style = console::style("Duplicate files").bold().red();
+        let hardlinks_style = console::style("Hard link count").bold().white();
+
+        'outer: loop {
+            let mut read_this_loop = 0;
+            while !self.receiver.is_empty() {
+                let read = self.receiver.recv_many(&mut buffer, 100).await;
+                if read == 0 {
+                    break 'outer;
+                }
+
+                buffer.drain(..).for_each(|data| {
+                    self.status.merge_status(data);
+                });
+                read_this_loop += read;
+                if read_this_loop > 1000 {
+                    break;
+                }
+            }
+            if self.receiver.is_closed(){
+                return;
+            }
+            term.move_cursor_to(0, 0).unwrap();
+            term.clear_line().unwrap();
+            println!(
+                "{}\t{: >9}\t{}\t{}",
+                partial_style, self.status.partial_hashes, full_style, self.status.full_hashes
+            );
+            term.clear_line().unwrap();
+            println!(
+                "{}\t{: >9}\t{}\t{: >9}",
+                duplicates_style, self.status.duplicates, hardlinks_style, self.status.hardlinks
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
 }
