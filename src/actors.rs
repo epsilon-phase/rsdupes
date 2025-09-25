@@ -62,7 +62,7 @@ impl Actor for PartialHasher {
                     while read_remaining > 0 {
                         let b_size = read_remaining.min(BLOCK_SIZE);
                         let bytes_read = file.read(&mut buffer[..b_size]).await.unwrap();
-                        ret.bytes_read+=bytes_read;
+                        ret.bytes_read += bytes_read;
                         read_remaining -= bytes_read;
                         ret.hasher.write_all(&buffer[..bytes_read]).unwrap();
                         if bytes_read == 0 {
@@ -98,7 +98,9 @@ impl Actor for PartialHasher {
                     counter += 1;
                 }
             }
-            self.display_channel.send(PartialHash(counter-last_count)).unwrap();
+            self.display_channel
+                .send(PartialHash(counter - last_count))
+                .unwrap();
         }
         println!("Partial hashing finished");
     }
@@ -298,7 +300,7 @@ impl Actor for BytewiseFileComparator {
             let mut found_match = None;
             for key in hash.iter() {
                 let a_perms = metadata(&key).await.unwrap().permissions();
-                if a_perms != b_perms{
+                if a_perms != b_perms {
                     continue;
                 }
                 let a = fmmap::tokio::AsyncMmapFile::open(&key).await.unwrap();
@@ -331,6 +333,7 @@ struct HardLinker {
     confirm_actions: bool,
     forwarder: Option<ActorSender<DuplicateMessage>>,
     display: ActorSender<StatusUpdate>,
+    fallback_to_symbolic: bool,
 }
 impl Actor for HardLinker {
     async fn operate(&mut self) {
@@ -368,13 +371,38 @@ impl Actor for HardLinker {
             // It should check here that both files are on the same device, as otherwise
             // hard linking is impossible, an additional flag may then control whether or not
             // a symbolic link is created instead.
+            let original_meta = metadata(&msg.original).await.unwrap();
+            let duplicate_meta = metadata(&msg.duplicate).await.unwrap();
+            let mut hard_linking = true;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if original_meta.dev() != duplicate_meta.dev() {
+                    if self.fallback_to_symbolic {
+                        hard_linking = false;
+                    } else {
+                        continue;
+                    }
+                }
+            }
             rename(&msg.duplicate, &backup).await.unwrap();
-            if let Err(e) = hard_link(&msg.original, &msg.duplicate).await {
+            let (link_result, update) = if hard_linking {
+                (
+                    hard_link(&msg.original, &msg.duplicate).await,
+                    StatusUpdate::HardLinks(1),
+                )
+            } else {
+                (
+                    symlink(&msg.original, &msg.duplicate).await,
+                    StatusUpdate::SymbolicLinks(1),
+                )
+            };
+            if let Err(e) = link_result {
                 eprintln!("Link error {}", e);
                 rename(&backup, &msg.duplicate).await.unwrap();
             } else {
                 remove_file(&backup).await.unwrap();
-                self.display.send(StatusUpdate::HardLinks(1)).unwrap();
+                self.display.send(update).unwrap();
             }
         }
     }
@@ -507,7 +535,7 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
                 joinset: JoinSet::new(),
                 receiver: full_hash_recv,
                 sender: full_filter_sender,
-                display_sender: display_sender,
+                 display_sender,
             };
             full_hasher.operate().await;
         });
@@ -528,7 +556,7 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
                 map: BTreeMap::new(),
                 receiver: collector_reciever,
                 sender: duplicate_sender,
-                display_sender: display_sender,
+                display_sender,
             };
             tc.operate().await;
         });
@@ -539,6 +567,7 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
         let confirm = args.confirm_actions;
         println!("Starting hard linker");
         let (forwarder_sender, forwarder_recv) = unbounded_channel();
+        let fallback_to_symbolic = args.fallback_to_symbolic;
         js.spawn(async move {
             let mut tc = HardLinker {
                 confirm_actions: confirm,
@@ -549,6 +578,7 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
                     None
                 },
                 display: display_sender,
+                fallback_to_symbolic
             };
             tc.operate().await;
         });
@@ -568,11 +598,13 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
             tc.operate().await;
         });
     }
-    js.spawn(async move{
-        StatusDisplay{
-            status:StatusData::default(),
-            receiver:display_receiver
-        }.operate().await;
+    js.spawn(async move {
+        StatusDisplay {
+            status: StatusData::default(),
+            receiver: display_receiver,
+        }
+        .operate()
+        .await;
     });
 
     js
@@ -582,6 +614,7 @@ enum StatusUpdate {
     FullHash(usize),
     Duplicates(usize),
     HardLinks(usize),
+    SymbolicLinks(usize),
 }
 #[derive(Default)]
 struct StatusData {
@@ -589,6 +622,7 @@ struct StatusData {
     full_hashes: usize,
     duplicates: usize,
     hardlinks: usize,
+    symbolic_links: usize,
 }
 impl StatusData {
     fn merge_status(&mut self, data: StatusUpdate) {
@@ -597,6 +631,7 @@ impl StatusData {
             StatusUpdate::HardLinks(n) => self.hardlinks += n,
             StatusUpdate::PartialHash(n) => self.partial_hashes += n,
             StatusUpdate::FullHash(n) => self.full_hashes += n,
+            StatusUpdate::SymbolicLinks(n) => self.symbolic_links += n,
         }
     }
 }
@@ -612,6 +647,7 @@ impl Actor for StatusDisplay {
         let full_style = console::style("Full hashes").bold().green();
         let duplicates_style = console::style("Duplicate files").bold().red();
         let hardlinks_style = console::style("Hard link count").bold().white();
+        let symlinks_style = console::style("Symbolic link count").bold().white();
 
         'outer: loop {
             let mut read_this_loop = 0;
@@ -629,7 +665,7 @@ impl Actor for StatusDisplay {
                     break;
                 }
             }
-            if self.receiver.is_closed(){
+            if self.receiver.is_closed() {
                 return;
             }
             term.move_cursor_to(0, 0).unwrap();
@@ -643,6 +679,7 @@ impl Actor for StatusDisplay {
                 "{}\t{: >9}\t{}\t{: >9}",
                 duplicates_style, self.status.duplicates, hardlinks_style, self.status.hardlinks
             );
+            println!("{}\t{: >9}", symlinks_style, self.status.symbolic_links);
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     }

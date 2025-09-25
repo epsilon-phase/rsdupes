@@ -50,6 +50,10 @@ struct Args {
     /// Confirm if you want to relink the files.
     #[arg(short, default_value_t = false)]
     confirm_actions: bool,
+    /// Create a symbolic link whenever it isn't possible to create a hard link, such as when the
+    /// files are across devices
+    #[arg(short, long, default_value_t = false)]
+    fallback_to_symbolic: bool,
     /// Write duplicates to a file.
     #[arg(short, long)]
     json_dump: Option<PathBuf>,
@@ -96,7 +100,7 @@ fn parse_size(item: &str) -> Result<u64, clap::error::Error> {
         "tib" | "Tib" => 1024 * 1024 * 1024 * 1024,
         _ => {
             return Err(clap::error::Error::raw(
-                clap::error::ErrorKind::ValueValidation,
+                ErrorKind::ValueValidation,
                 "Invalid suffix",
             ));
         }
@@ -124,7 +128,6 @@ fn main() {
     }
     .unwrap();
     runtime.block_on(async move {
-        use actors::Actor;
 
         let mut js = actors::run_actors(&&args);
         while !js.is_empty() {
