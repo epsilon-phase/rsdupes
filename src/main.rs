@@ -65,13 +65,14 @@ mod arg_tests {
     #[test]
     fn test_size_parsing() {
         use super::*;
-        let input = ["10gb", "1m", "1kb", "1k", "1kib"];
+        let input = ["10gb", "1m", "1kb", "1k", "1kib", "1000"];
         let expected: [u64; _] = [
             10_000_000_000u64,
             1_000_000u64,
             1_000u64,
             1_000u64,
             1_024u64,
+            1000u64,
         ];
         for i in input.iter().zip(expected.iter()) {
             assert_eq!(parse_size(i.0).unwrap(), *i.1);
@@ -98,6 +99,7 @@ fn parse_size(item: &str) -> Result<u64, clap::error::Error> {
         "Gib" | "gib" => 1024 * 1024 * 1024,
         "Tb" | "tb" | "t" | "T" => 1_000_000_000_000,
         "tib" | "Tib" => 1024 * 1024 * 1024 * 1024,
+        "" => 1,
         _ => {
             return Err(clap::error::Error::raw(
                 ErrorKind::ValueValidation,
@@ -128,7 +130,6 @@ fn main() {
     }
     .unwrap();
     runtime.block_on(async move {
-
         let mut js = actors::run_actors(&&args);
         while !js.is_empty() {
             js.join_next().await;
