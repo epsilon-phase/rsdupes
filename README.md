@@ -1,48 +1,61 @@
-Will, one day, provide a way to run an commands on duplicates of a file.
+Fast duplicate detection and remediation
+
+# Usage
+
+```sh
+rsdupes -i <extension-to-include> -e <extension-to-exclude> -m <minimum-size> <Directory>
+```
+
+## Detecting Duplicates Without Action
+
+To write a listing of duplicates, this is useful for figuring out what might be duplicated
+without doing anything risky.
+
+```sh
+rsdupes -j duplicates.json ~
+```
+
+## Playing with Water on Steam
+
+I have a lot of mods on some games, and did you know that some of them use duplicate assets?
+For example, for Rimworld, this should help slightly.
+
+```sh
+rsdupes -i jpg -i png -i xml -i dds -h ~/.local/share/Steam
+```
+
+## Playing with Fire on Steam
+For example, steam tends to install a lot of copies of mono for various games, this can consume **several** megabytes,
+and can be hard-linked for minor reduction of disk usage.
+
+This may have deleterious effects should the game's copy of Unity move to a newer version. This will also deduplicate
+the various Visual C++ redistributables, which might be... less hazardous.
+
+```sh
+# Don't run this probably
+rsdupes -i exe -i dll -i xml -h ~/.local/share/Steam
+```
+
+## Media File deduplication
+
+You may have a lot of media stored, I sure do. This might be helpful, and it should be safe.
+
+```sh
+rsdupes -i png -i jpg -i gif -i webp -i webm -i mp4 -i mkv -h <MEDIA-PATH>
+```
+
+# Current Functionality
 
 Current functionality:
-* Invoke on a single directory
+* Invoke on any number of directories
   1. Filters files based on size into buckets
   2. Filters those buckets into partial hashes(SHA256)
   3. Filters those partial hashed buckets into completely hashed buckets
   4. Filters those fully hashed files and compares them byte by byte, merging duplicates.
-     into buckets. This is also where permissions are compared. Currently, permissions 
+     into buckets. This is also where permissions are compared. Currently, permissions
      checks are only effective on unixes, but likely incomplete there.
   5. (Optionally) links duplicates together
   5. (Optionally) writes a json file
-
-Future functionality:
-* Invoke on a single directory
-  1. As above
-  2. Filter them into bytewise compared files
-  3. Execute specified command on each group of duplicates
-
-     Probably something like
-     `rsdupes ~ -exec <COMMAND> %OLDEST %-OLDEST`
-     1. Provide Oldest File
-
-        `%OLDEST`
-     2. Full file group modulo the oldest file
-
-        Probably something like `%-OLDEST`
-     3. Full file group
-
-        Something like `%GROUP`
-  4. Linking like jsdupes focuses on
-     1. Hardlinking
-     2. Symbolic links
-     3. Reflinks
-* Specify partial hash size
-* Specify thread pool sizes
-* Provide some way to finish filtering current tasks when there are dozens before spawning new ones.
-  (Memory usage can get quite high at this point)
-* Possibly provide a few different options for hash algorithms.
-
-  Honestly SHA256 is probably fine, but BLAKE3 looks like it might be a better fit for this particular
-  usecase
-* Use memory mapped files somehow. It would reduce copying substantially which would likely reduce the
-  overall system load, even if this program can saturate IO.
-* Operate exclusively on files that match or do not match a given pattern
 
 # Current JSON Structure
 
