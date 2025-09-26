@@ -8,6 +8,7 @@ use crate::actors::{Actor};
 
 pub struct FileRecursionActor {
     pub queue: VecDeque<PathBuf>,
+    pub excluded_paths:Vec<PathBuf>,
     pub sender: ActorSender<PathBuf>,
 }
 
@@ -16,12 +17,15 @@ impl Actor for FileRecursionActor {
         while let Some(x) = self.queue.pop_front() {
             if let Ok(mut dir) = read_dir(x).await {
                 while let Ok(Some(entry)) = dir.next_entry().await {
-                    // println!("{} - {}", entry.path().to_string_lossy(), count);
+                    if self.excluded_paths.iter().any(|excluding|entry.path().starts_with(excluding)) {
+                        continue;
+                    }
                     if let Ok(info) = entry.file_type().await {
                         if info.is_file() {
                             // println!("{}", entry.path().to_string_lossy());
                             self.sender.send(entry.path()).unwrap();
                         } else if info.is_dir() {
+
                             self.queue.push_back(entry.path());
                         }
                     }

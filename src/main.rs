@@ -6,7 +6,6 @@ use mimalloc::MiMalloc;
 use std::sync::{Arc, mpsc};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
-mod PartialHash;
 mod actor_types;
 mod actors;
 mod constants;
@@ -22,7 +21,7 @@ struct Args {
     #[arg(short, long, default_value_t = 25)]
     threads: usize,
     #[arg(value_name = "DIRECTORY")]
-    directory_entry_point: Option<PathBuf>,
+    directory_entry_point: Option<Vec<PathBuf>>,
     /// File extensions to limit operation to.
     #[arg(short, long)]
     included_extensions: Option<Vec<String>>,
@@ -30,6 +29,9 @@ struct Args {
     /// Not sensible to combine with desired extensions, but should work just fine.
     #[arg(short, long)]
     excluded_extensions: Option<Vec<String>>,
+    /// Exclude specific paths
+    #[arg(short,long)]
+    excluded_paths: Vec<PathBuf>,
     /// Exclude files below a specified number of bytes.
     ///
     /// Defaults to 1, specify zero to include zero length files, which can be dangerous

@@ -447,15 +447,17 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
     let path = args
         .directory_entry_point
         .clone()
-        .unwrap_or(PathBuf::from("."));
+        .unwrap_or(vec![PathBuf::from(".")]);
     {
         let needs_filter = args.excluded_extensions.is_some() || args.included_extensions.is_some();
+        let excluded_paths = args.excluded_paths.iter().cloned().collect();
         js.spawn(async move {
             let mut file_actor = FileRecursionActor {
                 queue: VecDeque::new(),
                 sender: file_sender,
+                excluded_paths
             };
-            file_actor.queue.push_back(path);
+            file_actor.queue.extend(path);
             file_actor.operate().await
         });
         if needs_filter {
@@ -565,7 +567,6 @@ pub fn run_actors(args: &crate::Args) -> JoinSet<()> {
         let display_sender = display_sender.clone();
         let json_dump = args.json_dump.is_some();
         let confirm = args.confirm_actions;
-        println!("Starting hard linker");
         let (forwarder_sender, forwarder_recv) = unbounded_channel();
         let fallback_to_symbolic = args.fallback_to_symbolic;
         js.spawn(async move {
@@ -648,7 +649,9 @@ impl Actor for StatusDisplay {
         let duplicates_style = console::style("Duplicate files").bold().red();
         let hardlinks_style = console::style("Hard link count").bold().white();
         let symlinks_style = console::style("Symbolic link count").bold().white();
-
+        // If the terminal is dumb, then we should just not expect it to respond reasonably,
+        // just ignore it and be silent.
+        let is_dumb = std::env::var("TERM").is_ok_and(|x|x=="dumb");
         'outer: loop {
             let mut read_this_loop = 0;
             while !self.receiver.is_empty() {
@@ -664,6 +667,9 @@ impl Actor for StatusDisplay {
                 if read_this_loop > 1000 {
                     break;
                 }
+            }
+            if !term.is_term() || is_dumb{
+                continue;
             }
             if self.receiver.is_closed() {
                 return;
