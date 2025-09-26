@@ -3,7 +3,11 @@ name = "rsdupes"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-author = "epsilon-phase"
+authors = ["epsilon-phase"]
+description = "A file deduplication utility."
+keywords = ['cli']
+categories =[ 'command-line-utilities', 'filesystem' ]
+
 [rustc]
 flags=['-Znext-solver']
 

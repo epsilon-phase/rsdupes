@@ -414,7 +414,7 @@ struct JsonDumper {
 }
 impl Actor for JsonDumper {
     async fn operate(&mut self) {
-        use tokio::sync::broadcast;
+        
         //We want to panic early in this because otherwise it's all for naught
         let file = std::fs::File::create(&self.output).unwrap();
         loop {

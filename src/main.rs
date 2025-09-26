@@ -1,17 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::error::ErrorKind;
 use clap::{Parser, command};
 use mimalloc::MiMalloc;
-use std::sync::{Arc, mpsc};
-use tokio::sync::oneshot;
-use tokio::task::JoinSet;
 mod actor_types;
 mod actors;
 mod constants;
 mod file_discovery_actors;
-// #[global_allocator]
-// static GLOBAL: MiMalloc = MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -30,7 +27,7 @@ struct Args {
     #[arg(short, long)]
     excluded_extensions: Option<Vec<String>>,
     /// Exclude specific paths
-    #[arg(short,long)]
+    #[arg(short, long)]
     excluded_paths: Vec<PathBuf>,
     /// Exclude files below a specified number of bytes.
     ///
